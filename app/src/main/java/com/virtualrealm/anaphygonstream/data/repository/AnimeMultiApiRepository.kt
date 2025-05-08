@@ -4,43 +4,65 @@ import android.util.Log
 import com.virtualrealm.anaphygonstream.data.api.ApiClient
 import com.virtualrealm.anaphygonstream.data.cache.ApiResponseCache
 import com.virtualrealm.anaphygonstream.data.models.AnimeDetailResponse
+import com.virtualrealm.anaphygonstream.data.models.AnimeItem
 import com.virtualrealm.anaphygonstream.data.models.AnimeListResponse
 import com.virtualrealm.anaphygonstream.data.models.ApiResponse
+import com.virtualrealm.anaphygonstream.data.models.Episode
 import com.virtualrealm.anaphygonstream.data.models.EpisodeDetailResponse
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 
 class AnimeMultiApiRepository {
     private val TAG = "AnimeRepository"
     private val api = ApiClient.animeApi
     private val cache = ApiResponseCache()
+    private val REQUEST_TIMEOUT = TimeUnit.SECONDS.toMillis(10) // 10 second timeout
 
     suspend fun getOngoingAnime(page: Int = 1): ApiResponse<AnimeListResponse> {
         // First try the cache
         val cacheKey = "ongoing_$page"
-        cache.get<AnimeListResponse>(cacheKey)?.let { return it }
+        cache.get<AnimeListResponse>(cacheKey)?.let {
+            Log.d(TAG, "Cache hit for ongoing anime page $page")
+            return it
+        }
 
         return withContext(Dispatchers.IO) {
             try {
-                // Try both API sources with proper fallback
-                val response = tryWithFallbacks(
-                    // Try Otakudesu first
-                    primaryCall = { api.getOngoingAnime(page) },
-                    // Then try Samehadaku with different ordering options
-                    fallbackCalls = listOf(
-                        { api.getHomeAnime() },
-                        { api.getSamehadakuOngoing(page, "update") },
-                        { api.getSamehadakuOngoing(page, "latest") },
-                        { api.getSamehadakuRecent(page) }
-                    ),
-                    cacheKey = cacheKey,
-                    errorMessage = "Failed to load ongoing anime"
-                )
-                response
+                // Use timeout to prevent hanging requests
+                withTimeout(REQUEST_TIMEOUT) {
+                    // Try both API sources with proper fallback
+                    val response = tryWithFallbacks(
+                        // Try Otakudesu first
+                        primaryCall = { api.getOngoingAnime(page) },
+                        // Then try Samehadaku with different ordering options
+                        fallbackCalls = listOf(
+                            { api.getHomeAnime() },
+                            { api.getSamehadakuOngoing(page, "update") },
+                            { api.getSamehadakuOngoing(page, "latest") },
+                            { api.getSamehadakuRecent(page) }
+                        ),
+                        cacheKey = cacheKey,
+                        errorMessage = "Failed to load ongoing anime"
+                    )
+                    response
+                }
+            } catch (e: CancellationException) {
+                Log.d(TAG, "Request was cancelled for ongoing anime page $page")
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error fetching ongoing anime", e)
-                createErrorResponse("Failed to load ongoing anime. Please check your internet connection or try again later.")
+
+                // Create a more specific error message based on the exception type
+                val errorMessage = when (e) {
+                    is IOException -> "Network error: Please check your internet connection and try again."
+                    else -> "Failed to load ongoing anime. Please check your internet connection or try again later."
+                }
+
+                createErrorResponse(errorMessage)
             }
         }
     }
@@ -48,74 +70,213 @@ class AnimeMultiApiRepository {
     suspend fun getCompleteAnime(page: Int = 1): ApiResponse<AnimeListResponse> {
         // Try the cache first
         val cacheKey = "complete_$page"
-        cache.get<AnimeListResponse>(cacheKey)?.let { return it }
+        cache.get<AnimeListResponse>(cacheKey)?.let {
+            Log.d(TAG, "Cache hit for complete anime page $page")
+            return it
+        }
 
         return withContext(Dispatchers.IO) {
             try {
-                // Define the call types - important: no suspend functions called here
-                val apiCalls = listOf(
-                    "getCompleteAnime",
-                    "getAnimeList",
-                    "getSamehadakuCompleted:update",
-                    "getSamehadakuCompleted:latest"
-                )
+                // Use timeout to prevent hanging requests
+                withTimeout(REQUEST_TIMEOUT) {
+                    // Define the call types - important: no suspend functions called here
+                    val apiCalls = listOf(
+                        "getCompleteAnime",
+                        "getAnimeList",
+                        "getSamehadakuCompleted:update",
+                        "getSamehadakuCompleted:latest"
+                    )
 
-                // Try each endpoint separately to isolate failures
-                for ((index, callType) in apiCalls.withIndex()) {
-                    try {
-                        val response = when (callType) {
-                            "getCompleteAnime" -> api.getCompleteAnime(page)
-                            "getAnimeList" -> api.getAnimeList(page)
-                            "getSamehadakuCompleted:update" -> api.getSamehadakuCompleted(page, "update")
-                            "getSamehadakuCompleted:latest" -> api.getSamehadakuCompleted(page, "latest")
-                            else -> null
-                        }
-
-                        // Check if we got a valid response
-                        if (response != null && response.ok && isValidResponse(response)) {
-                            // Cache successful response
-                            if (response.data?.animeList?.isNotEmpty() == true) {
-                                cache.put(cacheKey, response)
-                                return@withContext response
+                    // Try each endpoint separately to isolate failures
+                    for ((index, callType) in apiCalls.withIndex()) {
+                        try {
+                            val response = when (callType) {
+                                "getCompleteAnime" -> api.getCompleteAnime(page)
+                                "getAnimeList" -> api.getAnimeList(page)
+                                "getSamehadakuCompleted:update" -> api.getSamehadakuCompleted(page, "update")
+                                "getSamehadakuCompleted:latest" -> api.getSamehadakuCompleted(page, "latest")
+                                else -> null
                             }
-                        } else {
-                            Log.w(TAG, "API call #${index + 1} failed with status: ${response?.statusCode}")
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "API call #${index + 1} failed with exception", e)
-                        // Continue to next API call
-                    }
-                }
 
-                // If all APIs failed, return a clean error response
-                createErrorResponse("Failed to load completed anime. All available sources failed. Please try again later.")
+                            // Check if we got a valid response
+                            if (response != null && response.ok && isValidResponse(response)) {
+                                // Cache successful response
+                                if (response.data?.animeList?.isNotEmpty() == true) {
+                                    cache.put(cacheKey, response)
+                                    return@withTimeout response
+                                }
+                            } else {
+                                Log.w(TAG, "API call #${index + 1} failed with status: ${response?.statusCode}")
+                            }
+                        } catch (e: CancellationException) {
+                            throw e // Let cancellation propagate
+                        } catch (e: Exception) {
+                            Log.w(TAG, "API call #${index + 1} failed with exception", e)
+                            // Continue to next API call
+                        }
+                    }
+
+                    // If all APIs failed, return a clean error response
+                    createErrorResponse("Failed to load completed anime. All available sources failed. Please try again later.")
+                }
+            } catch (e: CancellationException) {
+                Log.d(TAG, "Request was cancelled for complete anime page $page")
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error fetching complete anime", e)
-                createErrorResponse("Failed to load completed anime. Please check your internet connection or try again later.")
+
+                // Create a more specific error message based on the exception type
+                val errorMessage = when (e) {
+                    is IOException -> "Network error: Please check your internet connection and try again."
+                    else -> "Failed to load completed anime. Please check your internet connection or try again later."
+                }
+
+                createErrorResponse(errorMessage)
             }
         }
     }
 
+
+
     suspend fun getAnimeDetail(animeId: String): ApiResponse<AnimeDetailResponse> {
         // Try cache first
         val cacheKey = "detail_$animeId"
-        cache.get<AnimeDetailResponse>(cacheKey)?.let { return it }
+        cache.get<AnimeDetailResponse>(cacheKey)?.let {
+            Log.d(TAG, "Cache hit for anime detail: $animeId")
+            return it
+        }
 
         return withContext(Dispatchers.IO) {
             try {
-                // Try Otakudesu first, then Samehadaku
-                val response = tryWithFallbacks(
-                    primaryCall = { api.getAnimeDetail(animeId) },
-                    fallbackCalls = listOf(
-                        { api.getSamehadakuAnimeDetail(animeId) }
-                    ),
-                    cacheKey = cacheKey,
-                    errorMessage = "Failed to load anime details"
-                )
-                response
+                // Use timeout to prevent hanging requests
+                withTimeout(REQUEST_TIMEOUT) {
+                    // Try different approaches to fetch anime details
+                    // Based on the logs, directly calling the /anime/{animeId} endpoint
+                    // results in 403 forbidden, so we'll try alternative approaches
+
+                    // First, try to get anime from ongoing anime list
+                    var matchingAnime: AnimeItem? = null
+                    var isFromOngoing = false
+
+                    val ongoingResponse = try {
+                        api.getOngoingAnime(1)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to fetch ongoing anime list: ${e.message}")
+                        null
+                    }
+
+                    if (ongoingResponse?.ok == true) {
+                        matchingAnime = ongoingResponse.data?.animeList?.find { it.animeId == animeId }
+                        if (matchingAnime != null) {
+                            isFromOngoing = true
+                        }
+                    }
+
+                    // If not found in ongoing, try completed anime
+                    if (matchingAnime == null) {
+                        val completedResponse = try {
+                            api.getCompleteAnime(1)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to fetch completed anime list: ${e.message}")
+                            null
+                        }
+
+                        if (completedResponse?.ok == true) {
+                            matchingAnime = completedResponse.data?.animeList?.find { it.animeId == animeId }
+                        }
+                    }
+
+                    // If found in any list, create a response with available data
+                    if (matchingAnime != null) {
+                        // Extract information from the matchingAnime
+                        val episodes = if (isFromOngoing) {
+                            // For ongoing anime, create a list of episodes up to the current count
+                            (1..matchingAnime.episodes).map { episodeNumber ->
+                                Episode(
+                                    title = "Episode $episodeNumber",
+                                    episodeId = "${animeId}_ep$episodeNumber",
+                                    href = "/otakudesu/episode/${animeId}_ep$episodeNumber",
+                                    otakudesuUrl = matchingAnime.otakudesuUrl ?: ""
+                                )
+                            }
+                        } else {
+                            // Otherwise empty list of episodes
+                            emptyList()
+                        }
+
+                        // Get rating/score if available
+                        val rating = try {
+                            // Try to access the "score" field using reflection
+                            val scoreField = matchingAnime::class.java.getDeclaredField("score")
+                            scoreField.isAccessible = true
+                            val score = scoreField.get(matchingAnime) as? String
+                            score ?: "N/A"
+                        } catch (e: Exception) {
+                            "N/A"
+                        }
+
+                        // Create the detail response with the available information
+                        val animeDetail = AnimeDetailResponse(
+                            title = matchingAnime.title,
+                            japaneseTitle = matchingAnime.title,  // Default to same title since we don't have Japanese title
+                            poster = matchingAnime.poster,
+                            rating = rating,
+                            synopsis = "Details not available from API. Please visit ${matchingAnime.otakudesuUrl} for full information.",
+                            genres = listOf("Anime"),  // Default genre
+                            episodes = episodes
+                        )
+
+                        val response = ApiResponse(
+                            statusCode = 200,
+                            statusMessage = "Success (partial data)",
+                            message = "Limited details available from API list endpoint",
+                            ok = true,
+                            data = animeDetail,
+                            pagination = null
+                        )
+
+                        // Cache this limited response
+                        cache.put(cacheKey, response)
+                        return@withTimeout response
+                    }
+
+                    // As a last resort, try the regular detail endpoints as before
+                    try {
+                        val directDetailResponse = api.getAnimeDetail(animeId)
+                        if (directDetailResponse.ok) {
+                            cache.put(cacheKey, directDetailResponse)
+                            return@withTimeout directDetailResponse
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Direct anime detail endpoint failed: ${e.message}")
+                    }
+
+                    try {
+                        val samehadakuDetailResponse = api.getSamehadakuAnimeDetail(animeId)
+                        if (samehadakuDetailResponse.ok) {
+                            cache.put(cacheKey, samehadakuDetailResponse)
+                            return@withTimeout samehadakuDetailResponse
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Samehadaku anime detail endpoint failed: ${e.message}")
+                    }
+
+                    // If we get here, we couldn't find any information
+                    createErrorResponse("Failed to load anime details. Could not find anime in any available source.")
+                }
+            } catch (e: CancellationException) {
+                Log.d(TAG, "Request was cancelled for anime detail: $animeId")
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error fetching anime detail: $animeId", e)
-                createErrorResponse("Failed to load anime details. Please check your internet connection or try again later.")
+
+                // Create a more specific error message based on the exception type
+                val errorMessage = when (e) {
+                    is IOException -> "Network error: Please check your internet connection and try again."
+                    else -> "Failed to load anime details: ${e.message ?: "Unknown error"}"
+                }
+
+                createErrorResponse(errorMessage)
             }
         }
     }
@@ -123,28 +284,160 @@ class AnimeMultiApiRepository {
     suspend fun getEpisodeDetail(episodeId: String): ApiResponse<EpisodeDetailResponse> {
         // Try cache first
         val cacheKey = "episode_$episodeId"
-        cache.get<EpisodeDetailResponse>(cacheKey)?.let { return it }
+        cache.get<EpisodeDetailResponse>(cacheKey)?.let {
+            Log.d(TAG, "Cache hit for episode detail: $episodeId")
+            return it
+        }
 
         return withContext(Dispatchers.IO) {
             try {
-                // Try Otakudesu first, then Samehadaku
-                val response = tryWithFallbacks(
-                    primaryCall = { api.getEpisodeDetail(episodeId) },
-                    fallbackCalls = listOf(
-                        { api.getSamehadakuEpisodeDetail(episodeId) }
-                    ),
-                    cacheKey = cacheKey,
-                    errorMessage = "Failed to load episode"
-                )
-                response
+                // Use timeout to prevent hanging requests
+                withTimeout(REQUEST_TIMEOUT) {
+                    // Try Otakudesu first, then Samehadaku
+                    val response = tryWithFallbacks(
+                        primaryCall = { api.getEpisodeDetail(episodeId) },
+                        fallbackCalls = listOf(
+                            { api.getSamehadakuEpisodeDetail(episodeId) }
+                        ),
+                        cacheKey = cacheKey,
+                        errorMessage = "Failed to load episode"
+                    )
+                    response
+                }
+            } catch (e: CancellationException) {
+                Log.d(TAG, "Request was cancelled for episode detail: $episodeId")
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error fetching episode detail: $episodeId", e)
-                createErrorResponse("Failed to load episode. Please check your internet connection or try again later.")
+
+                // Create a more specific error message based on the exception type
+                val errorMessage = when (e) {
+                    is IOException -> "Network error: Please check your internet connection and try again."
+                    else -> "Failed to load episode: ${e.message ?: "Unknown error"}"
+                }
+
+                createErrorResponse(errorMessage)
             }
         }
     }
 
-    // Other methods unchanged...
+    suspend fun searchAnime(query: String, page: Int = 1): ApiResponse<AnimeListResponse> {
+        // Try cache first
+        val cacheKey = "search_${query}_$page"
+        cache.get<AnimeListResponse>(cacheKey)?.let {
+            Log.d(TAG, "Cache hit for search: $query page $page")
+            return it
+        }
+
+        return withContext(Dispatchers.IO) {
+            try {
+                // Use timeout to prevent hanging requests
+                withTimeout(REQUEST_TIMEOUT) {
+                    // Try Otakudesu search first, then fall back to Samehadaku
+                    val response = tryWithFallbacks(
+                        primaryCall = { api.searchAnime(query, page) },
+                        fallbackCalls = listOf(
+                            { api.searchSamehadakuAnime(query, page) }
+                        ),
+                        cacheKey = cacheKey,
+                        errorMessage = "Failed to search anime"
+                    )
+                    response
+                }
+            } catch (e: CancellationException) {
+                Log.d(TAG, "Request was cancelled for search: $query")
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Error searching for anime: $query", e)
+
+                // Create a more specific error message based on the exception type
+                val errorMessage = when (e) {
+                    is IOException -> "Network error: Please check your internet connection and try again."
+                    else -> "Failed to search anime: ${e.message ?: "Unknown error"}"
+                }
+
+                createErrorResponse(errorMessage)
+            }
+        }
+    }
+
+    suspend fun getGenres(): ApiResponse<List<Map<String, String>>> {
+        // Try cache first
+        val cacheKey = "genres"
+        cache.get<List<Map<String, String>>>(cacheKey)?.let {
+            Log.d(TAG, "Cache hit for genres")
+            return it
+        }
+
+        return withContext(Dispatchers.IO) {
+            try {
+                // Use timeout to prevent hanging requests
+                withTimeout(REQUEST_TIMEOUT) {
+                    val response = tryWithFallbacks(
+                        primaryCall = { api.getGenres() },
+                        fallbackCalls = listOf(
+                            { api.getSamehadakuGenres() }
+                        ),
+                        cacheKey = cacheKey,
+                        errorMessage = "Failed to load genres"
+                    )
+                    response
+                }
+            } catch (e: CancellationException) {
+                Log.d(TAG, "Request was cancelled for genres")
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Error fetching genres", e)
+
+                // Create a more specific error message based on the exception type
+                val errorMessage = when (e) {
+                    is IOException -> "Network error: Please check your internet connection and try again."
+                    else -> "Failed to load genres: ${e.message ?: "Unknown error"}"
+                }
+
+                createErrorResponse(errorMessage)
+            }
+        }
+    }
+
+    suspend fun getAnimeByGenre(genreId: String, page: Int = 1): ApiResponse<AnimeListResponse> {
+        // Try cache first
+        val cacheKey = "genre_${genreId}_$page"
+        cache.get<AnimeListResponse>(cacheKey)?.let {
+            Log.d(TAG, "Cache hit for genre: $genreId page $page")
+            return it
+        }
+
+        return withContext(Dispatchers.IO) {
+            try {
+                // Use timeout to prevent hanging requests
+                withTimeout(REQUEST_TIMEOUT) {
+                    val response = tryWithFallbacks(
+                        primaryCall = { api.getAnimeByGenre(genreId, page) },
+                        fallbackCalls = listOf(
+                            { api.getSamehadakuAnimeByGenre(genreId, page) }
+                        ),
+                        cacheKey = cacheKey,
+                        errorMessage = "Failed to load anime by genre"
+                    )
+                    response
+                }
+            } catch (e: CancellationException) {
+                Log.d(TAG, "Request was cancelled for genre: $genreId")
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Error fetching anime by genre: $genreId", e)
+
+                // Create a more specific error message based on the exception type
+                val errorMessage = when (e) {
+                    is IOException -> "Network error: Please check your internet connection and try again."
+                    else -> "Failed to load anime by genre: ${e.message ?: "Unknown error"}"
+                }
+
+                createErrorResponse(errorMessage)
+            }
+        }
+    }
 
     // Generic method to try multiple API calls with fallbacks
     private suspend fun <T> tryWithFallbacks(
@@ -164,8 +457,10 @@ class AnimeMultiApiRepository {
             } else {
                 Log.w(TAG, "Primary API call failed: ${response.statusCode} - ${response.message}")
             }
+        } catch (e: CancellationException) {
+            throw e // Let cancellation propagate
         } catch (e: Exception) {
-            Log.w(TAG, "Primary API call failed with exception", e)
+            Log.w(TAG, "Primary API call failed with exception: ${e.message}", e)
         }
 
         // Try each fallback
@@ -188,8 +483,10 @@ class AnimeMultiApiRepository {
                     }
                     return adaptedResponse
                 }
+            } catch (e: CancellationException) {
+                throw e // Let cancellation propagate
             } catch (e: Exception) {
-                Log.w(TAG, "Fallback API call #${index + 1} failed", e)
+                Log.w(TAG, "Fallback API call #${index + 1} failed: ${e.message}", e)
             }
         }
 

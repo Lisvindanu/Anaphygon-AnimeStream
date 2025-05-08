@@ -35,6 +35,7 @@ class AnimeListViewModel : ViewModel() {
     private val _uiState = MutableStateFlow(AnimeListUiState())
     val uiState: StateFlow<AnimeListUiState> = _uiState.asStateFlow()
 
+
     fun loadOngoingAnime(page: Int = 1) {
         // Cancel any ongoing job to prevent race conditions
         currentLoadJob?.cancel()
@@ -125,7 +126,7 @@ class AnimeListViewModel : ViewModel() {
             searchJob = viewModelScope.launch {
                 try {
                     delay(500) // Debounce 500ms
-                    executeSearch()  // Panggil executeSearch() alih-alih searchAnime()
+                    searchAnime() // Menggunakan nama fungsi yang asli
                 } catch (e: CancellationException) {
                     // Coroutine was cancelled, ignore
                 } catch (e: Exception) {
@@ -145,8 +146,8 @@ class AnimeListViewModel : ViewModel() {
         }
     }
 
-    // Ganti nama fungsi menjadi executeSearch() untuk menghindari kebingungan
-    fun executeSearch(page: Int = 1) {
+    // Fungsi pencarian utama - kembalikan ke nama aslinya
+    fun searchAnime(page: Int = 1) {
         val query = _uiState.value.searchQuery.trim()
         if (query.isBlank()) {
             _uiState.update {
@@ -206,11 +207,6 @@ class AnimeListViewModel : ViewModel() {
         }
     }
 
-    // Alias untuk executeSearch untuk menjaga kompatibilitas
-    fun searchAnime(page: Int = 1) {
-        executeSearch(page)
-    }
-
     fun refreshCurrentTab() {
         when (_uiState.value.currentTab) {
             0 -> loadOngoingAnime()
@@ -224,7 +220,7 @@ class AnimeListViewModel : ViewModel() {
         // If there was a search query, retry the search
         if (currentState.lastSearchQuery.isNotBlank()) {
             _uiState.update { it.copy(searchQuery = currentState.lastSearchQuery) }
-            executeSearch()  // Gunakan executeSearch() alih-alih searchAnime()
+            searchAnime() // Menggunakan nama fungsi yang asli
         } else {
             // Otherwise retry the current tab
             refreshCurrentTab()

@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.net.UnknownHostException
+import java.io.IOException
 
 class AnimeDetailViewModel : ViewModel() {
     private val TAG = "AnimeDetailViewModel"
@@ -27,9 +29,11 @@ class AnimeDetailViewModel : ViewModel() {
 
     fun loadAnimeDetail(animeId: String) {
         _uiState.update { it.copy(isLoading = true, error = null) }
+
         viewModelScope.launch {
             try {
                 val response = repository.getAnimeDetail(animeId)
+
                 if (response.ok && response.data != null) {
                     _uiState.update {
                         it.copy(
@@ -49,13 +53,33 @@ class AnimeDetailViewModel : ViewModel() {
                     }
                 }
             } catch (e: CancellationException) {
+                // Let cancellations propagate normally
                 throw e
+            } catch (e: UnknownHostException) {
+                // Network connectivity issues
+                Log.e(TAG, "Network error loading anime detail: $animeId", e)
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        error = "Network unavailable. Please check your internet connection."
+                    )
+                }
+            } catch (e: IOException) {
+                // Other IO issues (timeouts, etc.)
+                Log.e(TAG, "IO error loading anime detail: $animeId", e)
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        error = "Connection error: ${e.message ?: "Unknown network error"}"
+                    )
+                }
             } catch (e: Exception) {
+                // All other exceptions
                 Log.e(TAG, "Error loading anime detail: $animeId", e)
                 _uiState.update {
                     it.copy(
                         isLoading = false,
-                        error = "Network error: ${e.message ?: "Unknown error"}"
+                        error = "Error: ${e.message ?: "Unknown error"}"
                     )
                 }
             }
@@ -64,5 +88,10 @@ class AnimeDetailViewModel : ViewModel() {
 
     fun retryLoadAnimeDetail(animeId: String) {
         loadAnimeDetail(animeId)
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        // Any cleanup code if needed
     }
 }

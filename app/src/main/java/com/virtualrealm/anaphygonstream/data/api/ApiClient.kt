@@ -1,12 +1,14 @@
 package com.virtualrealm.anaphygonstream.data.api
 
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 object ApiClient {
     private const val TAG = "ApiClient"
@@ -40,26 +42,45 @@ object ApiClient {
         var response: okhttp3.Response? = null
         var tryCount = 0
         var exception: Exception? = null
+        val isCancelled = AtomicBoolean(false)
 
-        while (tryCount < MAX_RETRIES) {
+        while (tryCount < MAX_RETRIES && !isCancelled.get()) {
             try {
                 // Close any previous response
                 response?.close()
+
+                // Check if the current thread is interrupted or the coroutine is cancelled
+                if (Thread.currentThread().isInterrupted) {
+                    isCancelled.set(true)
+                    throw InterruptedException("Thread was interrupted")
+                }
 
                 // Attempt the request
                 response = chain.proceed(request)
 
                 // If we got a server error (5xx) or 403, retry
-                if (response.code in 500..599 || response.code == 403) {
+                if ((response.code in 500..599 || response.code == 403) && tryCount < MAX_RETRIES - 1) {
                     Log.w(TAG, "Server error ${response.code}, retry attempt ${tryCount + 1}/$MAX_RETRIES")
-                    response.close()
+                    response.close() // Important: close the response before retrying
                     tryCount++
-                    Thread.sleep(1000L * tryCount) // Exponential backoff
+
+                    // Wait before retrying with exponential backoff
+                    Thread.sleep(1000L * tryCount)
                     continue
                 }
 
                 // For other responses, return the response
                 return@Interceptor response
+            } catch (e: CancellationException) {
+                // Propagate cancellation exceptions directly
+                isCancelled.set(true)
+                throw e
+            } catch (e: InterruptedException) {
+                // Handle thread interruption
+                isCancelled.set(true)
+                exception = e
+                Log.w(TAG, "Thread interrupted", e)
+                break
             } catch (e: Exception) {
                 exception = e
                 Log.w(TAG, "Request failed with ${e.javaClass.simpleName}, retry attempt ${tryCount + 1}/$MAX_RETRIES", e)
@@ -69,9 +90,20 @@ object ApiClient {
                     break
                 }
 
-                // Wait before retrying with exponential backoff
-                Thread.sleep(1000L * tryCount)
+                try {
+                    // Wait before retrying with exponential backoff
+                    Thread.sleep(1000L * tryCount)
+                } catch (ie: InterruptedException) {
+                    Log.w(TAG, "Sleep interrupted during retry delay", ie)
+                    isCancelled.set(true)
+                    break
+                }
             }
+        }
+
+        // If the operation was cancelled, throw a cancellation exception
+        if (isCancelled.get()) {
+            throw CancellationException("Request was cancelled")
         }
 
         // If we exhausted all retries and still have an exception, throw it

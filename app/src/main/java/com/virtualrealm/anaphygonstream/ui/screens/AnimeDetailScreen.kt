@@ -12,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -28,6 +29,7 @@ fun AnimeDetailScreen(
     viewModel: AnimeDetailViewModel = viewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val uriHandler = LocalUriHandler.current
 
     LaunchedEffect(animeId) {
         viewModel.loadAnimeDetail(animeId)
@@ -152,26 +154,41 @@ fun AnimeDetailScreen(
 
                                 Spacer(modifier = Modifier.height(8.dp))
 
-                                Text(
-                                    text = "Japanese: ${anime.japaneseTitle}",
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
+                                if (anime.japaneseTitle.isNotEmpty() && anime.japaneseTitle != anime.title) {
+                                    Text(
+                                        text = "Japanese: ${anime.japaneseTitle}",
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                }
 
-                                Spacer(modifier = Modifier.height(4.dp))
+                                if (anime.rating.isNotBlank() && anime.rating != "N/A") {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Star,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = "Rating: ${anime.rating}",
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                }
 
-                                Text(
-                                    text = "Rating: ${anime.rating}",
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
+                                if (anime.genres.isNotEmpty() && anime.genres.first() != "Anime") {
+                                    Text(
+                                        text = "Genres: ${anime.genres.joinToString(", ")}",
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
 
-                                Spacer(modifier = Modifier.height(8.dp))
-
-                                Text(
-                                    text = "Genres: ${anime.genres.joinToString(", ")}",
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-
-                                Spacer(modifier = Modifier.height(16.dp))
+                                    Spacer(modifier = Modifier.height(16.dp))
+                                }
 
                                 Text(
                                     text = "Synopsis",
@@ -180,25 +197,61 @@ fun AnimeDetailScreen(
 
                                 Spacer(modifier = Modifier.height(4.dp))
 
-                                Text(
-                                    text = anime.synopsis,
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
+                                if (anime.synopsis.contains("Details not available")) {
+                                    Column {
+                                        Text(
+                                            text = "Synopsis information is not available through the API.",
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+
+                                        Spacer(modifier = Modifier.height(8.dp))
+
+                                        // Extract the URL if present
+                                        val otakudesuUrl = anime.synopsis.substringAfter("Please visit ")
+                                            .substringBefore(" for full information")
+                                            .trim()
+
+                                        if (otakudesuUrl.startsWith("http")) {
+                                            OutlinedButton(
+                                                onClick = { uriHandler.openUri(otakudesuUrl) }
+                                            ) {
+                                                Icon(Icons.Default.OpenInBrowser, contentDescription = null)
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Text("Visit Official Site")
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    Text(
+                                        text = anime.synopsis,
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                }
 
                                 Spacer(modifier = Modifier.height(24.dp))
 
-                                Text(
-                                    text = "Episodes",
-                                    style = MaterialTheme.typography.titleMedium
-                                )
+                                if (anime.episodes.isNotEmpty()) {
+                                    Text(
+                                        text = "Episodes",
+                                        style = MaterialTheme.typography.titleMedium
+                                    )
+                                } else {
+                                    Text(
+                                        text = "Episodes information is not available through the API.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
 
-                        items(anime.episodes) { episode ->
-                            EpisodeItem(
-                                episode = episode,
-                                onClick = { onNavigateToEpisode(episode.episodeId) }
-                            )
+                        if (anime.episodes.isNotEmpty()) {
+                            items(anime.episodes) { episode ->
+                                EpisodeItem(
+                                    episode = episode,
+                                    onClick = { onNavigateToEpisode(episode.episodeId) }
+                                )
+                            }
                         }
                     }
                 } ?: run {

@@ -337,12 +337,14 @@ fun AnimeItem(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = anime.releaseDay,
+                        // Add null safety for releaseDay
+                        text = anime.releaseDay ?: "",
                         style = MaterialTheme.typography.bodySmall
                     )
 
                     Text(
-                        text = anime.latestReleaseDate,
+                        // Add null safety for latestReleaseDate
+                        text = anime.latestReleaseDate ?: "",
                         style = MaterialTheme.typography.bodySmall
                     )
                 }

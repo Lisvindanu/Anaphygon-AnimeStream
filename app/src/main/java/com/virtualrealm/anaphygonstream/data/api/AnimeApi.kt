@@ -9,11 +9,11 @@ import retrofit2.http.Path
 import retrofit2.http.Query
 
 interface AnimeApi {
-    // Original endpoints
+    // Otakudesu endpoints
     @GET("otakudesu/ongoing")
     suspend fun getOngoingAnime(@Query("page") page: Int = 1): ApiResponse<AnimeListResponse>
 
-    @GET("otakudesu/complete")
+    @GET("otakudesu/completed")
     suspend fun getCompleteAnime(@Query("page") page: Int = 1): ApiResponse<AnimeListResponse>
 
     @GET("otakudesu/anime/{animeId}")

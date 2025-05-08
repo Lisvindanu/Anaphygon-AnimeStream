@@ -22,15 +22,20 @@ data class AnimeListResponse(
     val animeList: List<AnimeItem>
 )
 
+// Updated AnimeItem data class in ApiResponse.kt to support both ongoing and completed anime fields
+
 data class AnimeItem(
     val title: String,
     val poster: String,
-    val episodes: Int,
-    val releaseDay: String,
-    val latestReleaseDate: String,
+    val episodes: Int = 0,
+    val releaseDay: String? = "",
+    val latestReleaseDate: String? = "",
+    val score: String? = null,            // Used in completed anime
+    val lastReleaseDate: String? = null,  // Used in completed anime
+    val status: String? = null,           // Some APIs include this
     val animeId: String,
     val href: String,
-    val otakudesuUrl: String
+    val otakudesuUrl: String? = null
 )
 
 data class AnimeDetailResponse(
