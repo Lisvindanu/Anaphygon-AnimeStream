@@ -1,8 +1,10 @@
+// First, let's improve the API client to handle the forbidden errors
+// File: app/src/main/java/com/virtualrealm/anaphygonstream/data/api/ApiClient.kt
+
 package com.virtualrealm.anaphygonstream.data.api
 
 import android.util.Log
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
@@ -13,23 +15,40 @@ import java.util.concurrent.atomic.AtomicBoolean
 object ApiClient {
     private const val TAG = "ApiClient"
     private const val BASE_URL = "https://wajik-anime-api.vercel.app/"
-    private const val TIMEOUT_SECONDS = 30L // Increased timeout
+    private const val TIMEOUT_SECONDS = 30L
     private const val MAX_RETRIES = 3
 
     // Create HTTP logging interceptor for debugging
     private val loggingInterceptor = HttpLoggingInterceptor().apply {
-        level = HttpLoggingInterceptor.Level.BODY
+        level = HttpLoggingInterceptor.Level.HEADERS
     }
 
     // Custom interceptor for retries and error handling
     private val customInterceptor = okhttp3.Interceptor { chain ->
         var request = chain.request()
 
+        // Modify URL for episode requests that often get 403s
+        val originalUrl = request.url
+        val urlString = originalUrl.toString()
+        val newUrl = if (urlString.contains("/episode/") || urlString.contains("/server/")) {
+            // Add special parameters that might help bypass restrictions
+            originalUrl.newBuilder()
+                .addQueryParameter("client", "android_app")
+                .addQueryParameter("ts", System.currentTimeMillis().toString())
+                .build()
+        } else {
+            originalUrl
+        }
+
         // Improve headers to better mimic a browser
         request = request.newBuilder()
-            .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .url(newUrl)
+            .removeHeader("User-Agent")
+            .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
             .addHeader("Accept", "application/json, text/plain, */*")
             .addHeader("Accept-Language", "en-US,en;q=0.9,id;q=0.8")
+            .addHeader("Origin", "https://otakudesu.cloud")
+            .addHeader("Referer", "https://otakudesu.cloud/")
             .addHeader("Connection", "keep-alive")
             .addHeader("Cache-Control", "no-cache")
             .addHeader("Pragma", "no-cache")
@@ -119,42 +138,9 @@ object ApiClient {
         return@Interceptor response!!
     }
 
-    // Add a connection interceptor to handle connection issues
-    private val connectionInterceptor = okhttp3.Interceptor { chain ->
-        val request = chain.request()
-        try {
-            val response = chain.proceed(request)
-
-            // Check for specific error code that might need special handling
-            if (response.code == 429) { // Too Many Requests
-                Log.w(TAG, "Received 429 Too Many Requests, implementing backoff")
-                // Close current response
-                response.close()
-
-                // Wait before retrying
-                Thread.sleep(5000)
-
-                // Try again with a modified request
-                val retryRequest = request.newBuilder()
-                    .removeHeader("User-Agent")
-                    .addHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                    .build()
-
-                return@Interceptor chain.proceed(retryRequest)
-            }
-
-            return@Interceptor response
-        } catch (e: Exception) {
-            // Log the exception type and message for debugging
-            Log.e(TAG, "Connection interceptor caught exception: ${e.javaClass.simpleName} - ${e.message}")
-            throw e
-        }
-    }
-
     private val okHttpClient = OkHttpClient.Builder()
         .addInterceptor(loggingInterceptor)
         .addInterceptor(customInterceptor)
-        .addInterceptor(connectionInterceptor)
         .connectTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .readTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .writeTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)

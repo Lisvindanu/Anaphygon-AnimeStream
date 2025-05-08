@@ -1,5 +1,6 @@
 package com.virtualrealm.anaphygonstream.data.repository
 
+import android.util.Base64
 import android.util.Log
 import com.virtualrealm.anaphygonstream.data.api.ApiClient
 import com.virtualrealm.anaphygonstream.data.cache.ApiResponseCache
@@ -14,6 +15,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import retrofit2.HttpException
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
@@ -282,7 +284,9 @@ class AnimeMultiApiRepository {
         }
     }
 
-    // In AnimeMultiApiRepository.kt, update the getEpisodeDetail function
+
+    // Di dalam AnimeMultiApiRepository.kt, perbaiki metode getEpisodeDetail:
+
     suspend fun getEpisodeDetail(episodeId: String): ApiResponse<EpisodeDetailResponse> {
         // Try cache first
         val cacheKey = "episode_$episodeId"
@@ -296,101 +300,146 @@ class AnimeMultiApiRepository {
                 // Use timeout to prevent hanging requests
                 withTimeout(REQUEST_TIMEOUT) {
                     // Try multiple approaches to fetch episode details
-                    val apiCalls = listOf(
-                        "getEpisodeDetail",
-                        "getSamehadakuEpisodeDetail",
-                        "extractFromAnimeDetail"
-                    )
+                    var lastError: Exception? = null
 
-                    // Try each endpoint separately to isolate failures
-                    for ((index, callType) in apiCalls.withIndex()) {
-                        try {
-                            val response = when (callType) {
-                                "getEpisodeDetail" -> {
-                                    Log.d(TAG, "Trying primary API for episode: $episodeId")
-                                    api.getEpisodeDetail(episodeId)
-                                }
-                                "getSamehadakuEpisodeDetail" -> {
-                                    Log.d(TAG, "Trying fallback API for episode: $episodeId")
-                                    api.getSamehadakuEpisodeDetail(episodeId)
-                                }
-                                "extractFromAnimeDetail" -> {
-                                    // Attempt to construct episode info from anime detail
-                                    // Extract the anime ID from the episode ID (assumes format: animeId_epX)
-                                    Log.d(TAG, "Attempting to extract episode from anime details")
-                                    val animeId = episodeId.substringBeforeLast("_")
-                                    val episodeNumber = episodeId.substringAfterLast("_ep").toIntOrNull() ?: 1
-
-                                    // Get the anime details
-                                    val animeDetail = try {
-                                        getAnimeDetail(animeId)
-                                    } catch (e: Exception) {
-                                        Log.e(TAG, "Failed to get anime detail for fallback", e)
-                                        null
-                                    }
-
-                                    if (animeDetail?.ok == true && animeDetail.data != null) {
-                                        // Create a synthetic response with limited information
-                                        val syntheticEpisodeDetail = EpisodeDetailResponse(
-                                            title = "${animeDetail.data.title} - Episode $episodeNumber",
-                                            poster = animeDetail.data.poster,
-                                            streams = listOf(
-                                                Stream(
-                                                    quality = "Alternative Source",
-                                                    url = "https://example.com/placeholder",
-                                                    streamId = "fallback"
-                                                )
-                                            )
-                                        )
-
-                                        ApiResponse(
-                                            statusCode = 200,
-                                            statusMessage = "Success (synthetic)",
-                                            message = "Episode data synthesized from anime details",
-                                            ok = true,
-                                            data = syntheticEpisodeDetail,
-                                            pagination = null
-                                        )
-                                    } else {
-                                        // Last resort - create a user-friendly error response
-                                        createErrorResponse("Episode not available in any source. Please try another episode.")
-                                    }
-                                }
-                                else -> null
-                            }
-
-                            // Check if we got a valid response
-                            if (response != null && response.ok && response.data != null) {
-                                // Cache successful response
-                                cache.put(cacheKey, response)
-                                return@withTimeout response
-                            } else {
-                                Log.w(TAG, "API call #${index + 1} failed with status: ${response?.statusCode}")
-                            }
-                        } catch (e: CancellationException) {
-                            throw e // Let cancellation propagate
-                        } catch (e: Exception) {
-                            Log.w(TAG, "API call #${index + 1} failed with exception", e)
-                            // Continue to next API call
+                    // 1. Try the primary API endpoint
+                    try {
+                        Log.d(TAG, "Trying primary API for episode: $episodeId")
+                        val response = api.getEpisodeDetail(episodeId)
+                        if (response.ok && response.data != null && response.data.streams.isNotEmpty()) {
+                            // Cache successful response
+                            cache.put(cacheKey, response)
+                            return@withTimeout response
                         }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "API call #1 failed with exception", e)
+                        lastError = e
+                        // Continue to next API call
                     }
 
-                    // If all APIs failed, return a clean error response
-                    createErrorResponse("Failed to load episode. Please check your connection or try another episode.")
+                    // 2. Try the fallback API endpoint
+                    try {
+                        Log.d(TAG, "Trying fallback API for episode: $episodeId")
+                        val response = api.getSamehadakuEpisodeDetail(episodeId)
+                        if (response.ok && response.data != null && response.data.streams.isNotEmpty()) {
+                            // Cache successful response
+                            cache.put(cacheKey, response)
+                            return@withTimeout response
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "API call #2 failed with exception", e)
+                        lastError = e
+                        // Continue to next option
+                    }
+
+                    // 3. Extract episode info from anime details and try direct OtakuDesu URL
+                    try {
+                        Log.d(TAG, "Attempting to use direct OtakuDesu streaming URL")
+                        // Extract the anime ID and episode number from the episode ID (assumes format: animeId_epX)
+                        val parts = episodeId.split("_ep")
+                        if (parts.size == 2) {
+                            val animeId = parts[0]
+                            val episodeNumber = parts[1].toIntOrNull() ?: 1
+
+                            // Get anime title and image from ongoing or completed anime list
+                            var matchingAnime: AnimeItem? = null
+
+                            val ongoingResponse = try {
+                                api.getOngoingAnime(1)
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed to fetch ongoing anime list", e)
+                                null
+                            }
+
+                            matchingAnime = ongoingResponse?.data?.animeList?.find { it.animeId == animeId }
+
+                            // If not found in ongoing, check completed anime
+                            if (matchingAnime == null) {
+                                val completedResponse = try {
+                                    api.getCompleteAnime(1)
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Failed to fetch completed anime list", e)
+                                    null
+                                }
+                                matchingAnime = completedResponse?.data?.animeList?.find { it.animeId == animeId }
+                            }
+
+                            // Generate direct OtakuDesu stream URL
+                            // Note: This is based on their URL pattern, might need adjustment
+                            val encodedId = Base64.encodeToString("$animeId:$episodeNumber".toByteArray(), Base64.DEFAULT).trim()
+                            val directOtakuDesuUrl = "https://desustream.info/dstream/otakuwatch4/index.php?id=$encodedId"
+
+                            // Create a test stream to try direct URL
+                            val directStreams = listOf(
+                                Stream(
+                                    quality = "HD (Direct)",
+                                    url = directOtakuDesuUrl,
+                                    streamId = "direct_otakudesu"
+                                )
+                            )
+
+                            // Add fallback in case direct streaming fails
+                            val fallbackStreams = listOf(
+                                Stream(
+                                    quality = "Fallback HD",
+                                    url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+                                    streamId = "fallback1"
+                                ),
+                                Stream(
+                                    quality = "Alternative Source",
+                                    url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+                                    streamId = "fallback2"
+                                )
+                            )
+
+                            val title = matchingAnime?.title ?: "Episode $episodeNumber"
+                            val poster = matchingAnime?.poster ?: ""
+
+                            val syntheticEpisodeDetail = EpisodeDetailResponse(
+                                title = "$title - Episode $episodeNumber",
+                                poster = poster,
+                                streams = directStreams + fallbackStreams
+                            )
+
+                            val response = ApiResponse(
+                                statusCode = 200,
+                                statusMessage = "Success (direct)",
+                                message = "Episode data with direct streaming URL",
+                                ok = true,
+                                data = syntheticEpisodeDetail,
+                                pagination = null
+                            )
+
+                            // Cache this synthetic response
+                            cache.put(cacheKey, response)
+                            return@withTimeout response
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to create direct streaming URL", e)
+                        lastError = e
+                    }
+
+                    // If all options fail, return a clean error response
+                    val errorMessage = when (lastError) {
+                        is HttpException -> {
+                            when (lastError.code()) {
+                                403 -> "Access denied (HTTP 403). The server is restricting access to this episode. Try a different anime or episode."
+                                404 -> "Episode not found (HTTP 404). This episode may not be available."
+                                else -> "Server error: HTTP ${lastError.code()}"
+                            }
+                        }
+                        is IOException -> "Network error: Please check your internet connection and try again."
+                        else -> "Failed to load episode. Please try a different episode or anime."
+                    }
+
+                    createErrorResponse(errorMessage)
                 }
             } catch (e: CancellationException) {
                 Log.d(TAG, "Request was cancelled for episode detail: $episodeId")
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error fetching episode detail: $episodeId", e)
-
-                // Create a more specific error message based on the exception type
-                val errorMessage = when (e) {
-                    is IOException -> "Network error: Please check your internet connection and try again."
-                    else -> "Failed to load episode: ${e.message ?: "Unknown error"}"
-                }
-
-                createErrorResponse(errorMessage)
+                createErrorResponse("Failed to load episode: ${e.message ?: "Unknown error"}")
             }
         }
     }

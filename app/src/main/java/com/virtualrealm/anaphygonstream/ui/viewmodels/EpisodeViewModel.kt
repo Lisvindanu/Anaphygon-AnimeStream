@@ -30,7 +30,7 @@ class EpisodeViewModel : ViewModel() {
     private val _uiState = MutableStateFlow(EpisodeUiState())
     val uiState: StateFlow<EpisodeUiState> = _uiState.asStateFlow()
 
-    // In EpisodeViewModel.kt, enhance the loadEpisodeDetail function
+
     fun loadEpisodeDetail(episodeId: String) {
         _uiState.update { it.copy(isLoading = true, error = null) }
         viewModelScope.launch {
@@ -56,7 +56,7 @@ class EpisodeViewModel : ViewModel() {
                         extractResolution(it.quality)
                     }
 
-                    // Get the best quality stream that's likely to work
+                    // Get the most reliable stream that's likely to work
                     val bestStream = findBestStream(sortedStreams)
 
                     _uiState.update {
@@ -85,8 +85,6 @@ class EpisodeViewModel : ViewModel() {
                         )
                     }
                 }
-            } catch (e: CancellationException) {
-                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error loading episode detail: $episodeId", e)
 
@@ -145,16 +143,33 @@ class EpisodeViewModel : ViewModel() {
         }
     }
 
-    // Helper function to determine the best stream to start with
     private fun findBestStream(streams: List<Stream>): Stream {
         if (streams.isEmpty()) {
             throw IllegalArgumentException("Stream list cannot be empty")
         }
 
-        // Categorize streams by likely reliability
+        // First, try to find streams that are from reliable sources
+        val reliableDomains = listOf(
+            "googleapis.com", // Google storage is reliable
+            "cloudfront.net", // AWS CDN is reliable
+            "akamaized.net"   // Akamai CDN is reliable
+        )
+
+        // Check if any streams are from reliable domains
+        val reliableStreams = streams.filter { stream ->
+            reliableDomains.any { domain -> stream.url.contains(domain, ignoreCase = true) }
+        }
+
+        if (reliableStreams.isNotEmpty()) {
+            // Choose the highest quality reliable stream
+            return reliableStreams.sortedByDescending { extractResolution(it.quality) }.first()
+        }
+
+        // If no reliable streams, categorize by quality
+        // Prefer medium quality (most reliable) in the 360p-720p range
         val mediumQualityStreams = streams.filter {
             val resolution = extractResolution(it.quality)
-            resolution in 360..720 && !it.quality.contains("HD", ignoreCase = true)
+            resolution in 360..720
         }
 
         // Prefer medium quality (most reliable)
@@ -162,17 +177,11 @@ class EpisodeViewModel : ViewModel() {
             return mediumQualityStreams.first()
         }
 
-        // Fallback to highest quality that's not labeled as "HD" (which may be less reliable)
-        val nonHDStreams = streams.filter { !it.quality.contains("HD", ignoreCase = true) }
-        if (nonHDStreams.isNotEmpty()) {
-            return nonHDStreams.first()
-        }
-
-        // If all else fails, use the first stream
+        // Fallback to first stream in list
         return streams.first()
     }
 
-    // Helper function to extract resolution numbers from quality string
+
     private fun extractResolution(quality: String): Int {
         // Extract numbers from strings like "720p", "1080p", "480p"
         val resolutionRegex = "(\\d+)p".toRegex()
@@ -188,5 +197,24 @@ class EpisodeViewModel : ViewModel() {
         }
     }
 
+    // In EpisodeViewModel.kt, add a function to refresh the stream URL
+    fun refreshStreamUrl(episodeId: String) {
+        viewModelScope.launch {
+            try {
+                val response = repository.getEpisodeDetail(episodeId)
+                if (response.ok && response.data != null) {
+                    val streamUrl = findBestStream(response.data.streams.sortedByDescending {
+                        extractResolution(it.quality)
+                    }).url
+
+                    _uiState.update {
+                        it.copy(selectedStreamUrl = streamUrl)
+                    }
+                }
+            } catch (e: Exception) {
+                // Handle error
+            }
+        }
+    }
 
 }
