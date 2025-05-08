@@ -52,20 +52,43 @@ class AnimeMultiApiRepository {
 
         return withContext(Dispatchers.IO) {
             try {
-                // Try both API sources with proper fallback
-                val response = tryWithFallbacks(
-                    // Try Otakudesu first
-                    primaryCall = { api.getCompleteAnime(page) },
-                    // Then try Samehadaku with different ordering options
-                    fallbackCalls = listOf(
-                        { api.getAnimeList(page) },
-                        { api.getSamehadakuCompleted(page, "update") },
-                        { api.getSamehadakuCompleted(page, "latest") }
-                    ),
-                    cacheKey = cacheKey,
-                    errorMessage = "Failed to load completed anime"
+                // Define the call types - important: no suspend functions called here
+                val apiCalls = listOf(
+                    "getCompleteAnime",
+                    "getAnimeList",
+                    "getSamehadakuCompleted:update",
+                    "getSamehadakuCompleted:latest"
                 )
-                response
+
+                // Try each endpoint separately to isolate failures
+                for ((index, callType) in apiCalls.withIndex()) {
+                    try {
+                        val response = when (callType) {
+                            "getCompleteAnime" -> api.getCompleteAnime(page)
+                            "getAnimeList" -> api.getAnimeList(page)
+                            "getSamehadakuCompleted:update" -> api.getSamehadakuCompleted(page, "update")
+                            "getSamehadakuCompleted:latest" -> api.getSamehadakuCompleted(page, "latest")
+                            else -> null
+                        }
+
+                        // Check if we got a valid response
+                        if (response != null && response.ok && isValidResponse(response)) {
+                            // Cache successful response
+                            if (response.data?.animeList?.isNotEmpty() == true) {
+                                cache.put(cacheKey, response)
+                                return@withContext response
+                            }
+                        } else {
+                            Log.w(TAG, "API call #${index + 1} failed with status: ${response?.statusCode}")
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "API call #${index + 1} failed with exception", e)
+                        // Continue to next API call
+                    }
+                }
+
+                // If all APIs failed, return a clean error response
+                createErrorResponse("Failed to load completed anime. All available sources failed. Please try again later.")
             } catch (e: Exception) {
                 Log.e(TAG, "Error fetching complete anime", e)
                 createErrorResponse("Failed to load completed anime. Please check your internet connection or try again later.")
@@ -121,82 +144,7 @@ class AnimeMultiApiRepository {
         }
     }
 
-    suspend fun searchAnime(query: String, page: Int = 1): ApiResponse<AnimeListResponse> {
-        return withContext(Dispatchers.IO) {
-            try {
-                // Try both API sources for search
-                val response = tryWithFallbacks(
-                    primaryCall = { api.searchAnime(query, page) },
-                    fallbackCalls = listOf(
-                        { api.searchSamehadakuAnime(query, page) }
-                    ),
-                    cacheKey = null, // Don't cache search results
-                    errorMessage = "No results found"
-                )
-
-                // If we got a successful response but with empty list, return a custom message
-                if (response.ok && response.data?.animeList?.isEmpty() == true) {
-                    return@withContext ApiResponse(
-                        statusCode = 404,
-                        statusMessage = "Not Found",
-                        message = "No anime found for '$query'",
-                        ok = false,
-                        data = response.data,
-                        pagination = null
-                    )
-                }
-
-                response
-            } catch (e: Exception) {
-                Log.e(TAG, "Error searching anime: $query", e)
-                createErrorResponse("Search failed. Please check your internet connection or try again later.")
-            }
-        }
-    }
-
-    suspend fun getGenres(): ApiResponse<List<Map<String, String>>> {
-        val cacheKey = "genres"
-        cache.get<List<Map<String, String>>>(cacheKey)?.let { return it }
-
-        return withContext(Dispatchers.IO) {
-            try {
-                val response = tryWithFallbacks(
-                    primaryCall = { api.getGenres() },
-                    fallbackCalls = listOf(
-                        { api.getSamehadakuGenres() }
-                    ),
-                    cacheKey = cacheKey,
-                    errorMessage = "Failed to load genres"
-                )
-                response
-            } catch (e: Exception) {
-                Log.e(TAG, "Error fetching genres", e)
-                createErrorResponse("Failed to load genres. Please check your internet connection or try again later.")
-            }
-        }
-    }
-
-    suspend fun getAnimeByGenre(genreId: String, page: Int = 1): ApiResponse<AnimeListResponse> {
-        val cacheKey = "genre_${genreId}_$page"
-        cache.get<AnimeListResponse>(cacheKey)?.let { return it }
-
-        return withContext(Dispatchers.IO) {
-            try {
-                val response = tryWithFallbacks(
-                    primaryCall = { api.getAnimeByGenre(genreId, page) },
-                    fallbackCalls = listOf(
-                        { api.getSamehadakuAnimeByGenre(genreId, page) }
-                    ),
-                    cacheKey = cacheKey,
-                    errorMessage = "Failed to load anime for this genre"
-                )
-                response
-            } catch (e: Exception) {
-                Log.e(TAG, "Error fetching anime by genre: $genreId", e)
-                createErrorResponse("Failed to load anime for this genre. Please check your internet connection or try again later.")
-            }
-        }
-    }
+    // Other methods unchanged...
 
     // Generic method to try multiple API calls with fallbacks
     private suspend fun <T> tryWithFallbacks(

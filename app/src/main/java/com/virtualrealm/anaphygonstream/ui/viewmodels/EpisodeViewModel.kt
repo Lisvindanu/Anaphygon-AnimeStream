@@ -66,6 +66,7 @@ class EpisodeViewModel : ViewModel() {
                         )
                     }
                 } else {
+                    Log.e(TAG, "API error loading episode: ${response.statusCode} - ${response.message}")
                     _uiState.update {
                         it.copy(
                             isLoading = false,
@@ -85,6 +86,10 @@ class EpisodeViewModel : ViewModel() {
                 }
             }
         }
+    }
+
+    fun retryLoadEpisodeDetail(episodeId: String) {
+        loadEpisodeDetail(episodeId)
     }
 
     fun selectStreamQuality(url: String) {
@@ -162,4 +167,6 @@ class EpisodeViewModel : ViewModel() {
             else -> 0 // Default lowest priority
         }
     }
+
+
 }

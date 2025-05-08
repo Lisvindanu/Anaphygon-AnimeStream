@@ -30,7 +30,7 @@ class AnimeDetailViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 val response = repository.getAnimeDetail(animeId)
-                if (response.ok) {
+                if (response.ok && response.data != null) {
                     _uiState.update {
                         it.copy(
                             isLoading = false,
@@ -39,10 +39,12 @@ class AnimeDetailViewModel : ViewModel() {
                         )
                     }
                 } else {
+                    val errorMsg = "Failed to load anime details: ${response.message ?: "Unknown error"}"
+                    Log.e(TAG, errorMsg)
                     _uiState.update {
                         it.copy(
                             isLoading = false,
-                            error = response.message
+                            error = errorMsg
                         )
                     }
                 }
@@ -53,7 +55,7 @@ class AnimeDetailViewModel : ViewModel() {
                 _uiState.update {
                     it.copy(
                         isLoading = false,
-                        error = e.message ?: "Unknown error"
+                        error = "Network error: ${e.message ?: "Unknown error"}"
                     )
                 }
             }

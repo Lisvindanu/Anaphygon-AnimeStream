@@ -125,7 +125,7 @@ class AnimeListViewModel : ViewModel() {
             searchJob = viewModelScope.launch {
                 try {
                     delay(500) // Debounce 500ms
-                    searchAnime()
+                    executeSearch()  // Panggil executeSearch() alih-alih searchAnime()
                 } catch (e: CancellationException) {
                     // Coroutine was cancelled, ignore
                 } catch (e: Exception) {
@@ -145,7 +145,8 @@ class AnimeListViewModel : ViewModel() {
         }
     }
 
-    fun searchAnime(page: Int = 1) {
+    // Ganti nama fungsi menjadi executeSearch() untuk menghindari kebingungan
+    fun executeSearch(page: Int = 1) {
         val query = _uiState.value.searchQuery.trim()
         if (query.isBlank()) {
             _uiState.update {
@@ -205,6 +206,11 @@ class AnimeListViewModel : ViewModel() {
         }
     }
 
+    // Alias untuk executeSearch untuk menjaga kompatibilitas
+    fun searchAnime(page: Int = 1) {
+        executeSearch(page)
+    }
+
     fun refreshCurrentTab() {
         when (_uiState.value.currentTab) {
             0 -> loadOngoingAnime()
@@ -218,7 +224,7 @@ class AnimeListViewModel : ViewModel() {
         // If there was a search query, retry the search
         if (currentState.lastSearchQuery.isNotBlank()) {
             _uiState.update { it.copy(searchQuery = currentState.lastSearchQuery) }
-            searchAnime()
+            executeSearch()  // Gunakan executeSearch() alih-alih searchAnime()
         } else {
             // Otherwise retry the current tab
             refreshCurrentTab()
