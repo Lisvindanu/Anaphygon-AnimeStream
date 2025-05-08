@@ -19,11 +19,15 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.Placeable
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavController
 import coil.compose.AsyncImage
 import com.google.android.exoplayer2.C
 import com.google.android.exoplayer2.ExoPlayer
@@ -31,12 +35,16 @@ import com.google.android.exoplayer2.MediaItem
 import com.google.android.exoplayer2.PlaybackException
 import com.google.android.exoplayer2.Player
 import com.google.android.exoplayer2.source.DefaultMediaSourceFactory
+import com.google.android.exoplayer2.source.ProgressiveMediaSource
+import com.google.android.exoplayer2.source.hls.HlsMediaSource
 import com.google.android.exoplayer2.ui.StyledPlayerView
 import com.google.android.exoplayer2.upstream.DefaultHttpDataSource
 import com.google.android.exoplayer2.util.MimeTypes
 import com.virtualrealm.anaphygonstream.ui.viewmodels.EpisodeViewModel
+import com.virtualrealm.anaphygonstream.utils.VideoExtractor
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.concurrent.TimeUnit
 
 private const val TAG = "VideoPlayerScreen"
 
@@ -45,26 +53,55 @@ private const val TAG = "VideoPlayerScreen"
 fun VideoPlayerScreen(
     episodeId: String,
     onNavigateBack: () -> Unit,
-    viewModel: EpisodeViewModel = viewModel()
+    viewModel: EpisodeViewModel = viewModel(),
+    navController: NavController? = null
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     // Player state
     var exoPlayer by remember { mutableStateOf<ExoPlayer?>(null) }
     var playbackError by remember { mutableStateOf<String?>(null) }
     var isBuffering by remember { mutableStateOf(false) }
     var isRetrying by remember { mutableStateOf(false) }
+    var isExtracting by remember { mutableStateOf(false) }
     var retryCount by remember { mutableStateOf(0) }
     var playerControlsVisible by remember { mutableStateOf(true) }
     var isPlayingFallbackVideo by remember { mutableStateOf(false) }
+    var useWebView by remember { mutableStateOf(false) }
     val maxRetries = 3
 
     // Load episode details when screen first appears
     LaunchedEffect(episodeId) {
         viewModel.loadEpisodeDetail(episodeId)
+    }
+
+    // Lifecycle observer for player
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> {
+                    exoPlayer?.pause()
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    if (playbackError == null) {
+                        exoPlayer?.play()
+                    }
+                }
+                Lifecycle.Event.ON_DESTROY -> {
+                    exoPlayer?.release()
+                    exoPlayer = null
+                }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     // Handle stream URL changes and set up the player
@@ -73,6 +110,41 @@ fun VideoPlayerScreen(
             // Check if this is a fallback video
             isPlayingFallbackVideo = url.contains("gtv-videos-bucket") ||
                     url.contains("commondatastorage.googleapis.com")
+
+            // Check if the URL is likely a direct media URL or a player page
+            val isLikelyDirectMedia = url.endsWith(".mp4") ||
+                    url.endsWith(".m3u8") ||
+                    url.contains("direct") ||
+                    isPlayingFallbackVideo
+
+            // If it's likely a player page, try to extract the actual video URL
+            if (!isLikelyDirectMedia && !url.contains("example.com")) {
+                // Show extraction indicator
+                isExtracting = true
+
+                try {
+                    Log.d(TAG, "Attempting to extract direct URL from: $url")
+                    val extractedUrl = VideoExtractor.extractVideoUrl(url)
+
+                    if (!extractedUrl.isNullOrEmpty()) {
+                        // Successfully extracted direct video URL
+                        Log.d(TAG, "Successfully extracted direct URL: $extractedUrl")
+
+                        // Update the viewModel with the extracted URL
+                        viewModel.updateStreamUrl(extractedUrl, uiState.selectedStreamQuality + " (Direct)")
+
+                        // Exit this LaunchedEffect - it will be triggered again with the new URL
+                        isExtracting = false
+                        return@let
+                    } else {
+                        Log.d(TAG, "Failed to extract direct URL")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error during video extraction: ${e.message}", e)
+                }
+
+                isExtracting = false
+            }
 
             // Release existing player if any
             exoPlayer?.release()
@@ -101,28 +173,26 @@ fun VideoPlayerScreen(
                         "Range" to "bytes=0-"
                     ))
 
-                // Create a MediaSourceFactory that uses our custom HttpDataSource.Factory
-                val mediaSourceFactory = DefaultMediaSourceFactory(context)
-                    .setDataSourceFactory(httpDataSourceFactory)
+                // Create appropriate MediaSource based on URL type
+                val mediaSourceFactory = if (url.contains(".m3u8")) {
+                    // HLS (m3u8) stream
+                    HlsMediaSource.Factory(httpDataSourceFactory)
+                } else {
+                    // Standard progressive stream (mp4, etc)
+                    ProgressiveMediaSource.Factory(httpDataSourceFactory)
+                }
 
                 // Build the ExoPlayer with our custom MediaSourceFactory
                 exoPlayer = ExoPlayer.Builder(context)
                     .setMediaSourceFactory(mediaSourceFactory)
                     .build().apply {
-                        // Use appropriate media item creation based on stream type
-                        val mediaItem = if (url.contains("m3u8") || url.contains("mpd")) {
-                            // Use HLS or DASH for adaptive streams
-                            val mimeType = when {
-                                url.contains("m3u8") -> MimeTypes.APPLICATION_M3U8
-                                url.contains("mpd") -> MimeTypes.APPLICATION_MPD
-                                else -> null
-                            }
+                        // Create appropriate MediaItem based on URL type
+                        val mediaItem = if (url.contains(".m3u8")) {
                             MediaItem.Builder()
                                 .setUri(Uri.parse(url))
-                                .setMimeType(mimeType)
+                                .setMimeType(MimeTypes.APPLICATION_M3U8)
                                 .build()
                         } else {
-                            // Regular progressive stream
                             MediaItem.fromUri(Uri.parse(url))
                         }
 
@@ -143,8 +213,16 @@ fun VideoPlayerScreen(
                                         "Video not found (HTTP 404). Try a different quality."
                                     PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ->
                                         "The video file is corrupted or in an unsupported format."
+                                    PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED ->
+                                        "This video format is not supported by the player."
                                     PlaybackException.ERROR_CODE_TIMEOUT ->
                                         "Operation timed out. Try again or select a different quality."
+                                    PlaybackException.ERROR_CODE_UNSPECIFIED ->
+                                        if (error.message?.contains("format", ignoreCase = true) == true) {
+                                            "Unrecognized video format. This may be a webpage instead of a video file."
+                                        } else {
+                                            "Unknown playback error: ${error.message ?: "No details available"}"
+                                        }
                                     else -> "Failed to play video: ${error.message ?: "Unknown error"}"
                                 }
 
@@ -195,23 +273,36 @@ fun VideoPlayerScreen(
 
             Log.d(TAG, "Auto-retrying playback (attempt $retryCount of $maxRetries)")
 
-            // Try to play again with the same URL but with modified attributes
+            // Check if we should try URL extraction again
             uiState.selectedStreamUrl?.let { url ->
+                val isPlayerPage = !url.endsWith(".mp4") && !url.endsWith(".m3u8") &&
+                        !isPlayingFallbackVideo && !url.contains("direct")
+
+                if (isPlayerPage && retryCount <= 1) {
+                    // For first retry on player pages, try to extract directly
+                    try {
+                        val extractedUrl = VideoExtractor.extractVideoUrl(url)
+                        if (!extractedUrl.isNullOrEmpty()) {
+                            viewModel.updateStreamUrl(extractedUrl, uiState.selectedStreamQuality + " (Direct)")
+
+                            isRetrying = false
+                            playbackError = null
+                            return@LaunchedEffect
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error during retry extraction: ${e.message}", e)
+                    }
+                }
+
+                // Standard media retry
                 try {
                     // Create a new media item with potentially different settings
-                    val mediaItem = if (url.contains("m3u8") || url.contains("mpd")) {
-                        // For HLS/DASH streams, try with explicit mime type
-                        val mimeType = when {
-                            url.contains("m3u8") -> MimeTypes.APPLICATION_M3U8
-                            url.contains("mpd") -> MimeTypes.APPLICATION_MPD
-                            else -> null
-                        }
+                    val mediaItem = if (url.contains(".m3u8")) {
                         MediaItem.Builder()
                             .setUri(Uri.parse(url))
-                            .setMimeType(mimeType)
+                            .setMimeType(MimeTypes.APPLICATION_M3U8)
                             .build()
                     } else {
-                        // For regular streams, try with the raw URL
                         MediaItem.fromUri(Uri.parse(url))
                     }
 
@@ -311,8 +402,63 @@ fun VideoPlayerScreen(
             } else if (uiState.error != null) {
                 ErrorView(
                     error = uiState.error ?: "Unknown error",
-                    onRetry = { viewModel.loadEpisodeDetail(episodeId) }
+                    onRetry = { viewModel.loadEpisodeDetail(episodeId) },
+                    onTryWebView = {
+                        // Trigger WebView fallback for current episode
+                        useWebView = true
+                    }
                 )
+            } else if (useWebView) {
+                // WebView player implementation
+                uiState.episodeDetail?.streams?.firstOrNull()?.let { stream ->
+                    Column(
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        // Add a header with info and back button
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(MaterialTheme.colorScheme.primaryContainer)
+                                .padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(onClick = { useWebView = false }) {
+                                Icon(Icons.Default.ArrowBack, contentDescription = "Back to Player")
+                            }
+                            Text(
+                                text = "WebView Player (Original Source)",
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+
+                        // WebView implementation
+                        AndroidView(
+                            factory = { context ->
+                                android.webkit.WebView(context).apply {
+                                    settings.apply {
+                                        javaScriptEnabled = true
+                                        domStorageEnabled = true
+                                        useWideViewPort = true
+                                        loadWithOverviewMode = true
+                                        mediaPlaybackRequiresUserGesture = false
+                                        javaScriptCanOpenWindowsAutomatically = true
+                                        setSupportMultipleWindows(true)
+                                        userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                                    }
+                                    webViewClient = android.webkit.WebViewClient()
+                                    webChromeClient = android.webkit.WebChromeClient()
+
+                                    // Load the original URL, not the potentially extracted one
+                                    loadUrl(stream.url)
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f)
+                        )
+                    }
+                }
             } else {
                 Column(modifier = Modifier.fillMaxSize()) {
                     // Video player container
@@ -354,6 +500,36 @@ fun VideoPlayerScreen(
                                     playerView.useController = playerControlsVisible
                                 }
                             )
+                        }
+
+                        // Show URL extraction notice
+                        if (isExtracting) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black.copy(alpha = 0.7f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    CircularProgressIndicator(
+                                        color = Color.White
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = "Extracting video URL...",
+                                        color = Color.White,
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "This may take a moment",
+                                        color = Color.White.copy(alpha = 0.7f),
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
                         }
 
                         // Show fallback video notice
@@ -449,22 +625,39 @@ fun VideoPlayerScreen(
 
                                 Spacer(modifier = Modifier.height(16.dp))
 
-                                Button(
-                                    onClick = {
-                                        uiState.selectedStreamUrl?.let { url ->
-                                            exoPlayer?.apply {
-                                                val mediaItem = MediaItem.fromUri(Uri.parse(url))
-                                                setMediaItem(mediaItem)
-                                                prepare()
-                                                play()
-                                            }
-                                            playbackError = null
-                                        }
-                                    }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Icon(Icons.Default.Refresh, contentDescription = null)
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text("Try Again")
+                                    Button(
+                                        onClick = {
+                                            uiState.selectedStreamUrl?.let { url ->
+                                                exoPlayer?.apply {
+                                                    val mediaItem = MediaItem.fromUri(Uri.parse(url))
+                                                    setMediaItem(mediaItem)
+                                                    prepare()
+                                                    play()
+                                                }
+                                                playbackError = null
+                                            }
+                                        }
+                                    ) {
+                                        Icon(Icons.Default.Refresh, contentDescription = null)
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Try Again")
+                                    }
+
+                                    Spacer(modifier = Modifier.width(16.dp))
+
+                                    // WebView fallback button
+                                    OutlinedButton(
+                                        onClick = { useWebView = true }
+                                    ) {
+                                        Icon(Icons.Default.OpenInBrowser, contentDescription = null)
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Use WebView")
+                                    }
                                 }
 
                                 Spacer(modifier = Modifier.height(8.dp))
@@ -536,7 +729,7 @@ fun VideoPlayerScreen(
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(16.dp)
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
                         ) {
                             Column(
                                 modifier = Modifier.padding(16.dp)
@@ -563,33 +756,20 @@ fun VideoPlayerScreen(
                                             Spacer(modifier = Modifier.height(4.dp))
 
                                             Text(
-                                                text = "The actual episode stream is unavailable due to API restrictions (HTTP 403 Forbidden). A demo video is playing instead.",
+                                                text = "The actual episode stream is unavailable due to API restrictions. A demo video is playing instead.",
                                                 style = MaterialTheme.typography.bodyMedium,
                                                 color = MaterialTheme.colorScheme.onPrimaryContainer
                                             )
 
                                             Spacer(modifier = Modifier.height(8.dp))
 
-                                            // Add a button to visit the official website
-                                            val originalWebsite = uiState.episodeDetail?.let {
-                                                val animeId = episodeId.split("_ep").firstOrNull() ?: ""
-                                                "https://otakudesu.cloud/anime/$animeId"
-                                            }
-
-                                            if (!originalWebsite.isNullOrEmpty()) {
-                                                OutlinedButton(
-                                                    onClick = {
-                                                        try {
-                                                            uriHandler.openUri(originalWebsite)
-                                                        } catch (e: Exception) {
-                                                            Log.e(TAG, "Error opening URI", e)
-                                                        }
-                                                    }
-                                                ) {
-                                                    Icon(Icons.Default.OpenInBrowser, contentDescription = null)
-                                                    Spacer(modifier = Modifier.width(8.dp))
-                                                    Text("Watch on Official Website")
-                                                }
+                                            // Add a button to try WebView as an alternative
+                                            OutlinedButton(
+                                                onClick = { useWebView = true }
+                                            ) {
+                                                Icon(Icons.Default.OpenInBrowser, contentDescription = null)
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Text("Try WebView Player")
                                             }
                                         }
                                     }
@@ -652,9 +832,107 @@ fun VideoPlayerScreen(
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text(
-                                        text = "Watch directly on the official website",
+                                        text = "Use WebView player for embedded content",
                                         style = MaterialTheme.typography.bodySmall
                                     )
+                                }
+
+                                Spacer(modifier = Modifier.height(4.dp))
+
+                                // Link to original website
+                                val originalWebsite = detail.streams.firstOrNull()?.let {
+                                    if (it.url.startsWith("http")) {
+                                        val domain = Uri.parse(it.url).host ?: ""
+                                        "https://$domain"
+                                    } else null
+                                }
+
+                                if (!originalWebsite.isNullOrEmpty()) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Public,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = "Visit original source website",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.clickable {
+                                                try {
+                                                    uriHandler.openUri(originalWebsite)
+                                                } catch (e: Exception) {
+                                                    Log.e(TAG, "Error opening URI", e)
+                                                }
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Advanced options card (only show when needed)
+                        if (!isPlayingFallbackVideo) {
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp)
+                                ) {
+                                    Text(
+                                        text = "Advanced Options",
+                                        style = MaterialTheme.typography.titleSmall
+                                    )
+
+                                    Spacer(modifier = Modifier.height(8.dp))
+
+                                    OutlinedButton(
+                                        onClick = { useWebView = true },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(Icons.Default.OpenInBrowser, contentDescription = null)
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Open in WebView")
+                                    }
+
+                                    Spacer(modifier = Modifier.height(4.dp))
+
+                                    OutlinedButton(
+                                        onClick = {
+                                            // Extract the animeId from the episodeId
+                                            val parts = episodeId.split("_ep")
+                                            if (parts.size == 2) {
+                                                val animeId = parts[0]
+                                                try {
+                                                    uriHandler.openUri("https://otakudesu.cloud/anime/$animeId")
+                                                } catch (e: Exception) {
+                                                    Log.e(TAG, "Error opening URI", e)
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(Icons.Default.Public, contentDescription = null)
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Visit Official Source")
+                                    }
+
+                                    // Add a button to refresh the source data
+                                    OutlinedButton(
+                                        onClick = {
+                                            viewModel.loadEpisodeDetail(episodeId)
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(Icons.Default.Refresh, contentDescription = null)
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Refresh Source Data")
+                                    }
                                 }
                             }
                         }
@@ -668,7 +946,8 @@ fun VideoPlayerScreen(
 @Composable
 fun ErrorView(
     error: String,
-    onRetry: () -> Unit
+    onRetry: () -> Unit,
+    onTryWebView: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -703,6 +982,7 @@ fun ErrorView(
 
         Spacer(modifier = Modifier.height(16.dp))
 
+        // Primary action: Retry
         Button(onClick = onRetry) {
             Icon(
                 imageVector = Icons.Default.Refresh,
@@ -714,7 +994,20 @@ fun ErrorView(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        OutlinedButton(
+        // Secondary action: Try WebView
+        OutlinedButton(onClick = onTryWebView) {
+            Icon(
+                imageVector = Icons.Default.OpenInBrowser,
+                contentDescription = null
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Try WebView Player")
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Tertiary action: Try another episode
+        TextButton(
             onClick = {
                 // This would ideally navigate to a different episode
                 // For now, just retry

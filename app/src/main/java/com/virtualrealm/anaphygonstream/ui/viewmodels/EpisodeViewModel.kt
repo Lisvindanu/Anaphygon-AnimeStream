@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.virtualrealm.anaphygonstream.data.models.EpisodeDetailResponse
 import com.virtualrealm.anaphygonstream.data.models.Stream
 import com.virtualrealm.anaphygonstream.data.repository.AnimeMultiApiRepository
+import com.virtualrealm.anaphygonstream.utils.VideoExtractor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -40,7 +41,6 @@ class EpisodeViewModel : ViewModel() {
                     val streams = response.data.streams
 
                     if (streams.isEmpty()) {
-                        // Handle empty streams case
                         _uiState.update {
                             it.copy(
                                 isLoading = false,
@@ -56,18 +56,60 @@ class EpisodeViewModel : ViewModel() {
                         extractResolution(it.quality)
                     }
 
-                    // Get the most reliable stream that's likely to work
-                    val bestStream = findBestStream(sortedStreams)
+                    // Try to extract real video URL from all available streams
+                    var directVideoUrl: String? = null
+                    var selectedStream: Stream? = null
 
-                    _uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            episodeDetail = response.data,
-                            selectedStreamUrl = bestStream.url,
-                            selectedStreamQuality = bestStream.quality,
-                            availableStreamQualities = sortedStreams,
-                            error = null
-                        )
+                    for (stream in sortedStreams) {
+                        val extractedUrl = VideoExtractor.extractVideoUrl(stream.url)
+                        if (!extractedUrl.isNullOrEmpty()) {
+                            directVideoUrl = extractedUrl
+                            selectedStream = stream
+                            Log.d(TAG, "Successfully extracted video URL from ${stream.quality}: $extractedUrl")
+                            break
+                        }
+                    }
+
+                    if (directVideoUrl != null && selectedStream != null) {
+                        // Create modified stream list with direct URL
+                        val modifiedStreams = sortedStreams.map { originalStream ->
+                            if (originalStream.url == selectedStream.url) {
+                                // Replace the URL in the selected stream with the direct URL
+                                Stream(
+                                    quality = "${originalStream.quality} (Direct)",
+                                    url = directVideoUrl,
+                                    streamId = originalStream.streamId
+                                )
+                            } else {
+                                // Keep original streams as-is
+                                originalStream
+                            }
+                        }
+
+                        // Update UI state with the direct video URL
+                        _uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                episodeDetail = response.data.copy(streams = modifiedStreams),
+                                selectedStreamUrl = directVideoUrl,
+                                selectedStreamQuality = "${selectedStream.quality} (Direct)",
+                                availableStreamQualities = modifiedStreams,
+                                error = null
+                            )
+                        }
+                    } else {
+                        // No direct URL could be extracted, fall back to default behavior
+                        val bestStream = findBestStream(sortedStreams)
+                        _uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                episodeDetail = response.data,
+                                selectedStreamUrl = bestStream.url,
+                                selectedStreamQuality = bestStream.quality,
+                                availableStreamQualities = sortedStreams,
+                                error = null
+                            )
+                        }
                     }
                 } else {
                     // Better error handling for API errors
@@ -214,6 +256,21 @@ class EpisodeViewModel : ViewModel() {
             } catch (e: Exception) {
                 // Handle error
             }
+        }
+    }
+
+    // Add this method to your EpisodeViewModel.kt:
+
+    /**
+     * Updates the selected stream URL and quality
+     */
+    fun updateStreamUrl(url: String, quality: String? = null) {
+        val currentQuality = _uiState.value.selectedStreamQuality ?: "Unknown"
+        _uiState.update {
+            it.copy(
+                selectedStreamUrl = url,
+                selectedStreamQuality = quality ?: currentQuality
+            )
         }
     }
 
