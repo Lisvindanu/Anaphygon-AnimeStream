@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import okio.IOException
 
 class EpisodeViewModel : ViewModel() {
     private val TAG = "EpisodeViewModel"
@@ -29,6 +30,7 @@ class EpisodeViewModel : ViewModel() {
     private val _uiState = MutableStateFlow(EpisodeUiState())
     val uiState: StateFlow<EpisodeUiState> = _uiState.asStateFlow()
 
+    // In EpisodeViewModel.kt, enhance the loadEpisodeDetail function
     fun loadEpisodeDetail(episodeId: String) {
         _uiState.update { it.copy(isLoading = true, error = null) }
         viewModelScope.launch {
@@ -38,10 +40,12 @@ class EpisodeViewModel : ViewModel() {
                     val streams = response.data.streams
 
                     if (streams.isEmpty()) {
+                        // Handle empty streams case
                         _uiState.update {
                             it.copy(
                                 isLoading = false,
-                                error = "No streaming sources available for this episode."
+                                episodeDetail = response.data,
+                                error = "No streaming sources available for this episode. Try another episode."
                             )
                         }
                         return@launch
@@ -66,11 +70,18 @@ class EpisodeViewModel : ViewModel() {
                         )
                     }
                 } else {
-                    Log.e(TAG, "API error loading episode: ${response.statusCode} - ${response.message}")
+                    // Better error handling for API errors
+                    val errorMsg = when {
+                        response.statusCode == 403 -> "Access denied: The API server rejected the request. Try again later."
+                        response.statusCode == 404 -> "Episode not found: This episode may not be available yet."
+                        else -> response.message ?: "Failed to load episode"
+                    }
+
+                    Log.e(TAG, "API error loading episode: ${response.statusCode} - $errorMsg")
                     _uiState.update {
                         it.copy(
                             isLoading = false,
-                            error = response.message ?: "Failed to load episode"
+                            error = errorMsg
                         )
                     }
                 }
@@ -78,10 +89,19 @@ class EpisodeViewModel : ViewModel() {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error loading episode detail: $episodeId", e)
+
+                // More user-friendly error message
+                val errorMsg = when (e) {
+                    is java.net.UnknownHostException -> "No internet connection. Please check your network and try again."
+                    is java.net.SocketTimeoutException -> "Connection timed out. The server is taking too long to respond."
+                    is IOException -> "Network error. Please check your connection and try again."
+                    else -> "Failed to load episode: ${e.message ?: "Unknown error"}"
+                }
+
                 _uiState.update {
                     it.copy(
                         isLoading = false,
-                        error = "Failed to load episode: ${e.localizedMessage ?: "Unknown error"}"
+                        error = errorMsg
                     )
                 }
             }

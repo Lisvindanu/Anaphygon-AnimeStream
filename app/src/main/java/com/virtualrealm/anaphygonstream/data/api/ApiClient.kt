@@ -29,7 +29,7 @@ object ApiClient {
         request = request.newBuilder()
             .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .addHeader("Accept", "application/json, text/plain, */*")
-            .addHeader("Accept-Language", "en-US,en;q=0.9")
+            .addHeader("Accept-Language", "en-US,en;q=0.9,id;q=0.8")
             .addHeader("Connection", "keep-alive")
             .addHeader("Cache-Control", "no-cache")
             .addHeader("Pragma", "no-cache")
@@ -63,6 +63,12 @@ object ApiClient {
                     Log.w(TAG, "Server error ${response.code}, retry attempt ${tryCount + 1}/$MAX_RETRIES")
                     response.close() // Important: close the response before retrying
                     tryCount++
+
+                    // Add a slight variation to the User-Agent on retry to avoid rate limiting
+                    request = request.newBuilder()
+                        .removeHeader("User-Agent")
+                        .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${120 + tryCount}.0.0.0 Safari/537.36")
+                        .build()
 
                     // Wait before retrying with exponential backoff
                     Thread.sleep(1000L * tryCount)
@@ -113,12 +119,46 @@ object ApiClient {
         return@Interceptor response!!
     }
 
+    // Add a connection interceptor to handle connection issues
+    private val connectionInterceptor = okhttp3.Interceptor { chain ->
+        val request = chain.request()
+        try {
+            val response = chain.proceed(request)
+
+            // Check for specific error code that might need special handling
+            if (response.code == 429) { // Too Many Requests
+                Log.w(TAG, "Received 429 Too Many Requests, implementing backoff")
+                // Close current response
+                response.close()
+
+                // Wait before retrying
+                Thread.sleep(5000)
+
+                // Try again with a modified request
+                val retryRequest = request.newBuilder()
+                    .removeHeader("User-Agent")
+                    .addHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    .build()
+
+                return@Interceptor chain.proceed(retryRequest)
+            }
+
+            return@Interceptor response
+        } catch (e: Exception) {
+            // Log the exception type and message for debugging
+            Log.e(TAG, "Connection interceptor caught exception: ${e.javaClass.simpleName} - ${e.message}")
+            throw e
+        }
+    }
+
     private val okHttpClient = OkHttpClient.Builder()
         .addInterceptor(loggingInterceptor)
         .addInterceptor(customInterceptor)
+        .addInterceptor(connectionInterceptor)
         .connectTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .readTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .writeTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     private val retrofit = Retrofit.Builder()
